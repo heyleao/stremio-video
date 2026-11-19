@@ -11,6 +11,7 @@ var usesCanvasASS = require('../withHTMLSubtitles/usesCanvasASS');
 var fetchVideoParams = require('./fetchVideoParams');
 var isPlayerLoaded = require('./isPlayerLoaded');
 var supportsTranscoding = require('../supportsTranscoding');
+var discoverEmbeddedASS = require('../embeddedASSCompatibility');
 var ERROR = require('../error');
 
 var FONT_EXTENSION_PATTERN = /\.(?:otc|otf|ttc|ttf|woff2?)(?:$|[?#])/i;
@@ -351,11 +352,20 @@ function withStreamingServer(Video) {
                                     };
                                     fetch(sourceBase + '?' + sourceQuery + (usesCanvasASS() ? '&deferFonts=1' : ''), fetchOptions)
                                         .then(function(response) {
+                                            if (commandArgs !== loadArgs) return null;
+                                            if (commandArgs.platform === 'Tizen' && (response.status === 404 || response.status === 501)) {
+                                                return discoverEmbeddedASS(result.mediaURL, fetchOptions).then(function(sources) {
+                                                    if (commandArgs !== loadArgs || sources.length === 0) return;
+                                                    video.dispatch({ type: 'command', commandName: 'addEmbeddedASSSources', commandArgs: {
+                                                        sources: sources
+                                                    } });
+                                                });
+                                            }
                                             if (!response.ok) throw new Error('Embedded ASS discovery unavailable');
                                             return response.json();
                                         })
                                         .then(function(metadata) {
-                                            if (commandArgs !== loadArgs || !Array.isArray(metadata.tracks)) return;
+                                            if (commandArgs !== loadArgs || !metadata || !Array.isArray(metadata.tracks)) return;
                                             var fonts = (metadata.fonts || []).map(getFontURL);
                                             video.dispatch({ type: 'command', commandName: 'addEmbeddedASSSources', commandArgs: {
                                                 sources: metadata.tracks.map(function(track) {
