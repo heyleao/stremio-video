@@ -1,35 +1,20 @@
 var assert = require('node:assert/strict');
-var fs = require('node:fs');
-var path = require('node:path');
 var test = require('node:test');
+var createFixture = require('./matroskaFixture');
 var discoverEmbeddedASS = require('../src/embeddedASSCompatibility');
 var matroska = require('../src/embeddedASSMatroska');
 
 var mediaURL = 'https://media.example.test/video.mkv';
-var fixture = fs.readFileSync(path.join(__dirname, 'fixtures/synthetic-h264-srt-ass.mkv'));
+var fixture = createFixture();
 
-function partialResponse(range) {
+function partialResponse(range, bytes = fixture) {
     var match = /^bytes=(\d+)-(\d+)$/.exec(range);
     var start = Number(match[1]);
-    var end = Math.min(Number(match[2]), fixture.length - 1);
-    return new Response(fixture.subarray(start, end + 1), {
+    var end = Math.min(Number(match[2]), bytes.length - 1);
+    return new Response(bytes.subarray(start, end + 1), {
         status: 206,
-        headers: { 'Content-Range': 'bytes ' + start + '-' + end + '/' + fixture.length }
+        headers: { 'Content-Range': 'bytes ' + start + '-' + end + '/' + bytes.length }
     });
-}
-
-function discoverWithMatroska(overrides) {
-    var compatibilityPath = require.resolve('../src/embeddedASSCompatibility');
-    var originalCompatibility = require.cache[compatibilityPath];
-    var parserModule = require.cache[require.resolve('../src/embeddedASSMatroska')];
-    delete require.cache[compatibilityPath];
-    parserModule.exports = Object.assign({}, matroska, overrides);
-    try {
-        return require(compatibilityPath);
-    } finally {
-        parserModule.exports = matroska;
-        require.cache[compatibilityPath] = originalCompatibility;
-    }
 }
 
 test('extracts the embedded ASS track and reuses the initial range across windows', async function(t) {
@@ -41,49 +26,32 @@ test('extracts the embedded ASS track and reuses the initial range across window
     assert.equal(tracks.length, 1);
     assert.equal(tracks[0].codec, 'ass');
     assert.match(await tracks[0].loadWindow(0, 3000), /Dialogue:.*0:00:01\.00,0:00:04\.00/);
-    assert.match(await tracks[0].loadWindow(4000, 8000), /TESTE 2 - segunda legenda/);
+    assert.match(await tracks[0].loadWindow(4000, 8000), /Second subtitle/);
     assert.equal(request.mock.callCount(), 1);
 });
 
 test('keeps an indexed silent subtitle window empty without scanning the video', async function(t) {
-    t.mock.method(globalThis, 'fetch', async function(_url, init) {
-        return partialResponse(new Headers(init.headers).get('Range'));
+    var bytes = createFixture({ padding: 300000 });
+    var request = t.mock.method(globalThis, 'fetch', async function(_url, init) {
+        return partialResponse(new Headers(init.headers).get('Range'), bytes);
     });
-    var scan = t.mock.fn(async function() {
-        throw new Error('A silent window should not scan video clusters');
-    });
-    var discover = discoverWithMatroska({
-        parseCues: async function(...args) {
-            var cues = await matroska.parseCues(...args);
-            return cues.concat({ track: 1, time: 40000, clusterPosition: 1000 });
-        },
-        scanClusters: scan
-    });
-    var tracks = await discover(mediaURL);
-
+    var tracks = await discoverEmbeddedASS(mediaURL);
     assert.match(await tracks[0].loadWindow(0, 8000), /^Dialogue:/m);
+    var previousRequests = request.mock.callCount();
     var silentWindow = await tracks[0].loadWindow(30000, 90000);
     assert.match(silentWindow, /^\[Script Info\]/m);
     assert.doesNotMatch(silentWindow, /^Dialogue:/m);
-    assert.equal(scan.mock.callCount(), 0);
+    assert.equal(request.mock.callCount(), previousRequests);
 });
 
 test('uses the cluster scan for a track absent from the subtitle index', async function(t) {
+    var bytes = createFixture({ indexSubtitles: false });
     t.mock.method(globalThis, 'fetch', async function(_url, init) {
-        return partialResponse(new Headers(init.headers).get('Range'));
+        return partialResponse(new Headers(init.headers).get('Range'), bytes);
     });
-    var scan = t.mock.fn(matroska.scanClusters);
-    var discover = discoverWithMatroska({
-        parseCues: async function(...args) {
-            var cues = await matroska.parseCues(...args);
-            return cues.filter(function(cue) { return cue.track === 1; });
-        },
-        scanClusters: scan
-    });
-    var tracks = await discover(mediaURL);
+    var tracks = await discoverEmbeddedASS(mediaURL);
 
-    assert.match(await tracks[0].loadWindow(0, 8000), /TESTE 2 - segunda legenda/);
-    assert.ok(scan.mock.callCount() > 0);
+    assert.match(await tracks[0].loadWindow(0, 8000), /Second subtitle/);
 });
 
 test('continues from the next byte when the origin returns only part of the requested range', async function(t) {
@@ -100,7 +68,7 @@ test('continues from the next byte when the origin returns only part of the requ
     });
     var tracks = await discoverEmbeddedASS(mediaURL);
     assert.equal(tracks.length, 1);
-    assert.match(await tracks[0].loadWindow(0, 8000), /TESTE 2 - segunda legenda/);
+    assert.match(await tracks[0].loadWindow(0, 8000), /Second subtitle/);
     assert.deepEqual(requests, [0, 2048, 4096, 6144]);
 });
 

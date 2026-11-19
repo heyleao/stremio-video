@@ -1324,7 +1324,8 @@ function withHTMLSubtitles(Video) {
                         var selectedNativeTrack = videoSubtitleTracks.find(function(track) {
                             return track.id === videoSelectedSubtitlesTrackId;
                         });
-                        if (assSubtitlesStylingEnabled && selectedEmbeddedASSTrackId === null && getEmbeddedASSSource(selectedNativeTrack) !== null) {
+                        if (assSubtitlesStylingEnabled && selectedTrackId === null && selectedEmbeddedASSTrackId === null &&
+                            getEmbeddedASSSource(selectedNativeTrack) !== null) {
                             setProp('selectedSubtitlesTrackId', selectedNativeTrack.id);
                         }
                     }
