@@ -135,7 +135,7 @@ var _RangeReader = class _RangeReader {
   /**
    * Read `length` bytes starting at `offset` from the file.
    */
-  async read(offset, length) {
+  async read(offset, length, readAheadSize = _RangeReader.READ_AHEAD_SIZE) {
     if (this.fullBuffer) {
       return this.fullBuffer.slice(offset, offset + length);
     }
@@ -144,7 +144,7 @@ var _RangeReader = class _RangeReader {
       return this.cacheBuffer.slice(start, start + length);
     }
     this._requestCount++;
-    const readAheadLength = Math.max(length, _RangeReader.READ_AHEAD_SIZE);
+    const readAheadLength = Math.max(length, readAheadSize);
     const end = Math.min(offset + readAheadLength - 1, this.fileSize - 1);
     const response = await this.fetchFn(this.url, {
       headers: __spreadProps(__spreadValues({}, this.customHeaders), {
@@ -326,6 +326,7 @@ var CUE_TRACK_POSITIONS = 183;
 var CUE_TRACK = 247;
 var CUE_CLUSTER_POSITION = 241;
 var CUE_RELATIVE_POSITION = 240;
+var CUE_DURATION = 178;
 var CHAPTERS = 272869232;
 var TAGS = 307544935;
 var SEGMENT_LEVEL_IDS = /* @__PURE__ */ new Set([
@@ -494,6 +495,7 @@ async function parseCues(reader, segmentDataOffset, cuesPosition) {
       let track = 0;
       let clusterPosition = 0;
       let relativePosition;
+      let duration;
       for (const posChild of iterateChildren(cuesData, child.dataOffset, child.dataSize)) {
         switch (posChild.id) {
           case CUE_TRACK:
@@ -505,9 +507,12 @@ async function parseCues(reader, segmentDataOffset, cuesPosition) {
           case CUE_RELATIVE_POSITION:
             relativePosition = readUint(cuesData, posChild.dataOffset, posChild.dataSize);
             break;
+          case CUE_DURATION:
+            duration = readUint(cuesData, posChild.dataOffset, posChild.dataSize);
+            break;
         }
       }
-      entries.push({ time: cueTime, track, clusterPosition, relativePosition });
+      entries.push({ time: cueTime, track, clusterPosition, relativePosition, duration });
     }
   }
   return entries;
@@ -715,7 +720,7 @@ async function readTargetedBlocks(reader, segmentDataOffset, cueEntries, subtitl
     }
   }
   const firstClusterPos = cueEntries[0].clusterPosition;
-  const probeBuf = await reader.read(segmentDataOffset + firstClusterPos, HEADER_READ_SIZE);
+  const probeBuf = await reader.read(segmentDataOffset + firstClusterPos, HEADER_READ_SIZE, HEADER_READ_SIZE);
   const clusterHeaderSize = parseElementHeader(probeBuf, 0).dataOffset;
   const directTargets = [];
   const fallbackClusters = [];
@@ -740,7 +745,7 @@ async function readTargetedBlocks(reader, segmentDataOffset, cueEntries, subtitl
       const batchBlocks = [];
       const readStart = batch[0].absPos;
       const readEnd = batch[batch.length - 1].absPos + BLOCK_SIZE_ESTIMATE;
-      const batchData = await reader.read(readStart, readEnd - readStart);
+      const batchData = await reader.read(readStart, readEnd - readStart, BLOCK_SIZE_ESTIMATE);
       for (const target of batch) {
         const localOffset = target.absPos - readStart;
         const remaining = batchData.length - localOffset;
@@ -755,7 +760,7 @@ async function readTargetedBlocks(reader, segmentDataOffset, cueEntries, subtitl
             el = parseElementHeader(elementData, 0);
           } else {
             const elementSize = headerEl.dataOffset - localOffset + headerEl.dataSize;
-            elementData = await reader.read(target.absPos, elementSize);
+            elementData = await reader.read(target.absPos, elementSize, BLOCK_SIZE_ESTIMATE);
             el = parseElementHeader(elementData, 0);
           }
         } catch (e) {

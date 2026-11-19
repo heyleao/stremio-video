@@ -41,6 +41,7 @@ async function discoverEmbeddedASS(mediaURL, options) {
     var initialRange = null;
     var mediaSize = null;
     var cues = null;
+    var indexedTracks = null;
 
     // Each operation has its own request budget and cancellation. The first
     // validated range can seed later readers for the same playback session.
@@ -79,12 +80,12 @@ async function discoverEmbeddedASS(mediaURL, options) {
                             headers: { 'Content-Range': 'bytes ' + start + '-' + cachedEnd + '/' + mediaSize }
                         });
                     }
-                    if (bytesRead + length > MAX_READ_BYTES) throw new Error('Embedded ASS range budget exceeded');
+                    if (bytesRead + length > MAX_READ_BYTES) throw new Error('Embedded ASS range budget exceeded (32 MiB of media data)');
                     var bytes;
                     var next = start;
                     var headers = new Headers(init.headers);
                     while (next <= end) {
-                        if (++requests > MAX_REQUESTS) throw new Error('Embedded ASS range budget exceeded');
+                        if (++requests > MAX_REQUESTS) throw new Error('Embedded ASS range budget exceeded (500 HTTP requests)');
                         headers.set('Range', 'bytes=' + next + '-' + end);
                         var response = await fetch(input, Object.assign({}, init, {
                             headers: headers,
@@ -154,22 +155,31 @@ async function discoverEmbeddedASS(mediaURL, options) {
                         throw new Error('Invalid embedded ASS time window');
                     }
                     var timestampScale = segment.info.timestampScale;
+                    var cueMs = timestampScale / 1000000;
                     var lookback = Math.max(0, from - 15000);
-                    if (!cues) cues = await matroska.parseCues(reader, segment.segmentDataOffset, cueEntry.position);
-                    var windowCues = cues.filter(function(cue) {
-                        var time = cue.time * timestampScale / 1000000;
-                        return time >= lookback && time < to;
-                    });
-                    var subtitleCues = windowCues.filter(function(cue) { return cue.track === track.trackNumber; });
+                    if (!cues) {
+                        cues = await matroska.parseCues(reader, segment.segmentDataOffset, cueEntry.position);
+                        indexedTracks = new Set(cues.map(function(cue) { return cue.track; }));
+                    }
                     var trackNumbers = new Set([track.trackNumber]);
-                    var blocks;
-                    if (subtitleCues.length > 0) {
-                        blocks = await matroska.readTargetedBlocks(reader, segment.segmentDataOffset, subtitleCues,
-                            trackNumbers, timestampScale, 1);
+                    var blocks = [];
+                    if (indexedTracks.has(track.trackNumber)) {
+                        var subtitleCues = cues.filter(function(cue) {
+                            if (cue.track !== track.trackNumber || cue.time * cueMs >= to) return false;
+                            return cue.duration === undefined ? cue.time * cueMs >= lookback :
+                                (cue.time + cue.duration) * cueMs >= from;
+                        });
+                        if (subtitleCues.length) {
+                            blocks = await matroska.readTargetedBlocks(reader, segment.segmentDataOffset, subtitleCues,
+                                trackNumbers, timestampScale, 1);
+                        }
                     } else {
                         // Some muxers index video clusters only. Limit the scan to the requested time window.
+                        var windowCues = cues.filter(function(cue) {
+                            var time = cue.time * cueMs;
+                            return time >= lookback && time < to;
+                        });
                         var positions = Array.from(new Set(windowCues.map(function(cue) { return cue.clusterPosition; })));
-                        blocks = [];
                         for (var position of positions) {
                             var next = cues.reduce(function(end, cue) {
                                 return cue.clusterPosition > position ? Math.min(end, cue.clusterPosition) : end;

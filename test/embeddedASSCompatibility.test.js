@@ -18,6 +18,20 @@ function partialResponse(range) {
     });
 }
 
+function discoverWithMatroska(overrides) {
+    var compatibilityPath = require.resolve('../src/embeddedASSCompatibility');
+    var originalCompatibility = require.cache[compatibilityPath];
+    var parserModule = require.cache[require.resolve('../src/embeddedASSMatroska')];
+    delete require.cache[compatibilityPath];
+    parserModule.exports = Object.assign({}, matroska, overrides);
+    try {
+        return require(compatibilityPath);
+    } finally {
+        parserModule.exports = matroska;
+        require.cache[compatibilityPath] = originalCompatibility;
+    }
+}
+
 test('extracts the embedded ASS track and reuses the initial range across windows', async function(t) {
     var request = t.mock.method(globalThis, 'fetch', async function(_url, init) {
         return partialResponse(new Headers(init.headers).get('Range'));
@@ -29,6 +43,47 @@ test('extracts the embedded ASS track and reuses the initial range across window
     assert.match(await tracks[0].loadWindow(0, 3000), /Dialogue:.*0:00:01\.00,0:00:04\.00/);
     assert.match(await tracks[0].loadWindow(4000, 8000), /TESTE 2 - segunda legenda/);
     assert.equal(request.mock.callCount(), 1);
+});
+
+test('keeps an indexed silent subtitle window empty without scanning the video', async function(t) {
+    t.mock.method(globalThis, 'fetch', async function(_url, init) {
+        return partialResponse(new Headers(init.headers).get('Range'));
+    });
+    var scan = t.mock.fn(async function() {
+        throw new Error('A silent window should not scan video clusters');
+    });
+    var discover = discoverWithMatroska({
+        parseCues: async function(...args) {
+            var cues = await matroska.parseCues(...args);
+            return cues.concat({ track: 1, time: 40000, clusterPosition: 1000 });
+        },
+        scanClusters: scan
+    });
+    var tracks = await discover(mediaURL);
+
+    assert.match(await tracks[0].loadWindow(0, 8000), /^Dialogue:/m);
+    var silentWindow = await tracks[0].loadWindow(30000, 90000);
+    assert.match(silentWindow, /^\[Script Info\]/m);
+    assert.doesNotMatch(silentWindow, /^Dialogue:/m);
+    assert.equal(scan.mock.callCount(), 0);
+});
+
+test('uses the cluster scan for a track absent from the subtitle index', async function(t) {
+    t.mock.method(globalThis, 'fetch', async function(_url, init) {
+        return partialResponse(new Headers(init.headers).get('Range'));
+    });
+    var scan = t.mock.fn(matroska.scanClusters);
+    var discover = discoverWithMatroska({
+        parseCues: async function(...args) {
+            var cues = await matroska.parseCues(...args);
+            return cues.filter(function(cue) { return cue.track === 1; });
+        },
+        scanClusters: scan
+    });
+    var tracks = await discover(mediaURL);
+
+    assert.match(await tracks[0].loadWindow(0, 8000), /TESTE 2 - segunda legenda/);
+    assert.ok(scan.mock.callCount() > 0);
 });
 
 test('continues from the next byte when the origin returns only part of the requested range', async function(t) {
