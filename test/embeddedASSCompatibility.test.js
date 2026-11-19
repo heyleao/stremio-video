@@ -30,6 +30,24 @@ test('extracts the embedded ASS track and reuses the initial range across window
     assert.equal(request.mock.callCount(), 1);
 });
 
+test('continues from the next byte when the origin returns only part of the requested range', async function(t) {
+    var requests = [];
+    t.mock.method(globalThis, 'fetch', async function(_url, init) {
+        var range = new Headers(init.headers).get('Range');
+        var start = Number(/^bytes=(\d+)-/.exec(range)[1]);
+        requests.push(start);
+        var end = Math.min(start + 2047, fixture.length - 1);
+        return new Response(fixture.subarray(start, end + 1), {
+            status: 206,
+            headers: { 'Content-Range': 'bytes ' + start + '-' + end + '/' + fixture.length }
+        });
+    });
+    var tracks = await discoverEmbeddedASS(mediaURL);
+    assert.equal(tracks.length, 1);
+    assert.match(await tracks[0].loadWindow(0, 8000), /TESTE 2 - segunda legenda/);
+    assert.deepEqual(requests, [0, 2048, 4096, 6144]);
+});
+
 test('cancels the body if the origin ignores Range', async function(t) {
     var cancelled = false;
     var body = new ReadableStream({ cancel: function() { cancelled = true; } });

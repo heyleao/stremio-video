@@ -3,7 +3,7 @@ var matroska = require('./embeddedASSMatroska');
 var MAX_RANGE_BYTES = 8 * 1024 * 1024;
 var MAX_READ_BYTES = 32 * 1024 * 1024;
 var MAX_REQUESTS = 500;
-var TIMEOUT_MS = 30000;
+var TIMEOUT_MS = 60000;
 
 async function readRangeBody(response, expectedLength) {
     var reader = response.body && response.body.getReader();
@@ -49,7 +49,11 @@ async function discoverEmbeddedASS(mediaURL, options) {
         var signals = [discoverySignal, operationSignal].filter(Boolean);
         var abort = function() { controller.abort(); };
         signals.forEach(function(signal) { signal.addEventListener('abort', abort); });
-        var deadline = setTimeout(abort, TIMEOUT_MS);
+        var timedOut = false;
+        var deadline = setTimeout(function() {
+            timedOut = true;
+            abort();
+        }, TIMEOUT_MS);
         var bytesRead = 0;
         var requests = 0;
         try {
@@ -75,32 +79,48 @@ async function discoverEmbeddedASS(mediaURL, options) {
                             headers: { 'Content-Range': 'bytes ' + start + '-' + cachedEnd + '/' + mediaSize }
                         });
                     }
-                    if (++requests > MAX_REQUESTS ||
-                        bytesRead + length > MAX_READ_BYTES) {
-                        throw new Error('Embedded ASS range budget exceeded');
+                    if (bytesRead + length > MAX_READ_BYTES) throw new Error('Embedded ASS range budget exceeded');
+                    var bytes;
+                    var next = start;
+                    var headers = new Headers(init.headers);
+                    while (next <= end) {
+                        if (++requests > MAX_REQUESTS) throw new Error('Embedded ASS range budget exceeded');
+                        headers.set('Range', 'bytes=' + next + '-' + end);
+                        var response = await fetch(input, Object.assign({}, init, {
+                            headers: headers,
+                            credentials: 'omit',
+                            signal: controller.signal
+                        }));
+                        var contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('Content-Range'));
+                        var last = contentRange && Number(contentRange[2]);
+                        var size = contentRange && Number(contentRange[3]);
+                        if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== next ||
+                            !Number.isSafeInteger(size) || last < next || last > Math.min(end, size - 1) ||
+                            (mediaSize !== null && mediaSize !== size)) {
+                            if (response.body) await response.body.cancel().catch(function() {});
+                            throw new Error('Expected a valid partial media response (HTTP ' + response.status +
+                                (contentRange ? ', unexpected Content-Range)' : ', unavailable Content-Range)'));
+                        }
+                        mediaSize = size;
+                        end = Math.min(end, size - 1);
+                        if (!bytes) bytes = new Uint8Array(end - start + 1);
+                        var received = await readRangeBody(response, last - next + 1);
+                        bytes.set(received, next - start);
+                        bytesRead += received.byteLength;
+                        next = last + 1;
                     }
-                    bytesRead += length;
-                    var response = await fetch(input, Object.assign({}, init, {
-                        credentials: 'omit',
-                        signal: controller.signal
-                    }));
-                    var contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('Content-Range'));
-                    var last = contentRange && Number(contentRange[2]);
-                    var size = contentRange && Number(contentRange[3]);
-                    if (response.status !== 206 || !contentRange || Number(contentRange[1]) !== start ||
-                        !Number.isSafeInteger(size) || last < start || last !== Math.min(end, size - 1) ||
-                        (mediaSize !== null && mediaSize !== size)) {
-                        if (response.body) await response.body.cancel().catch(function() {});
-                        throw new Error('Expected a valid partial media response');
-                    }
-                    var bytes = await readRangeBody(response, last - start + 1);
-                    mediaSize = size;
                     if (start === 0 && !initialRange) initialRange = bytes;
-                    return new Response(bytes, { status: 206, headers: response.headers });
+                    return new Response(bytes, {
+                        status: 206,
+                        headers: { 'Content-Range': 'bytes ' + start + '-' + end + '/' + mediaSize }
+                    });
                 }
             });
             await reader.init();
             return await read(reader);
+        } catch (error) {
+            if (timedOut) throw new Error('Timed out while reading embedded ASS ranges');
+            throw error;
         } finally {
             clearTimeout(deadline);
             signals.forEach(function(signal) { signal.removeEventListener('abort', abort); });
