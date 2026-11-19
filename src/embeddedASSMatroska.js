@@ -517,6 +517,8 @@ async function parseCues(reader, segmentDataOffset, cuesPosition) {
 var HEADER_READ_SIZE = 16;
 var MAX_BATCH_GAP = 2 * 1024 * 1024;
 var BLOCK_SIZE_ESTIMATE = 4096;
+// Keep adjacent cues from turning into a read of the intervening video.
+var MAX_BATCH_BYTES = 128 * 1024;
 var READ_AHEAD = 32 * 1024;
 async function scanClusters(reader, startOffset, endOffset, subtitleTrackNumbers, timestampScale) {
   const blocks = [];
@@ -831,7 +833,9 @@ function groupIntoBatches(targets, threshold) {
   const batches = [];
   let current = [targets[0]];
   for (let i = 1; i < targets.length; i++) {
-    if (targets[i].absPos - targets[i - 1].absPos <= threshold) {
+    const gap = targets[i].absPos - targets[i - 1].absPos;
+    const span = targets[i].absPos - current[0].absPos + BLOCK_SIZE_ESTIMATE;
+    if (gap <= threshold && span <= MAX_BATCH_BYTES) {
       current.push(targets[i]);
     } else {
       batches.push(current);

@@ -3,6 +3,7 @@ var fs = require('node:fs');
 var path = require('node:path');
 var test = require('node:test');
 var discoverEmbeddedASS = require('../src/embeddedASSCompatibility');
+var matroska = require('../src/embeddedASSMatroska');
 
 var mediaURL = 'https://media.example.test/video.mkv';
 var fixture = fs.readFileSync(path.join(__dirname, 'fixtures/synthetic-h264-srt-ass.mkv'));
@@ -46,6 +47,25 @@ test('continues from the next byte when the origin returns only part of the requ
     assert.equal(tracks.length, 1);
     assert.match(await tracks[0].loadWindow(0, 8000), /TESTE 2 - segunda legenda/);
     assert.deepEqual(requests, [0, 2048, 4096, 6144]);
+});
+
+test('keeps widely spaced subtitle cues from triggering a large video read', async function() {
+    var clusterHeader = Uint8Array.of(0x1f, 0x43, 0xb6, 0x75, 0x80);
+    var simpleBlock = Uint8Array.of(0xa3, 0x85, 0x83, 0, 0, 0x80, 0x41);
+    var cues = Array.from({ length: 20 }, function(_, index) {
+        return { time: index * 1000, track: 3, clusterPosition: index * 512 * 1024, relativePosition: 16 };
+    });
+    var reader = {
+        read: async function(offset, length) {
+            assert.ok(length <= 128 * 1024, 'read exceeds the subtitle batch limit');
+            var data = new Uint8Array(length);
+            data.set(offset === 0 ? clusterHeader : simpleBlock);
+            return data;
+        }
+    };
+
+    var blocks = await matroska.readTargetedBlocks(reader, 0, cues, new Set([3]), 1000000, 1);
+    assert.deepEqual(blocks.map(function(block) { return block.timestampMs; }), cues.map(function(cue) { return cue.time; }));
 });
 
 test('cancels the body if the origin ignores Range', async function(t) {
